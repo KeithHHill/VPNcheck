@@ -1,65 +1,33 @@
 import geocoder
-import smtplib
 import os
 import ConfigParser
 import time
 import subprocess
 import sys
+import psutil
+
 
 
 # get config
 myPath = os.path.dirname(os.path.abspath(__file__))
+connectScript = myPath+"\VPNconnect.bat"
+disconnectScript = myPath+"\VPNdisconnect.bat"
 
-try: 
-    config = ConfigParser.ConfigParser()
-    config.read(myPath+"\config.ini")
-    enabled = config.get('config','enabled')
-    emailLogin = config.get('config','emailLogin')
-    emailPassword = config.get('config','emailPassword')
-    emailServer = config.get('config','emailServer')
-    vpnScriptLocation = config.get('config','vpnScriptLocation')
-    bitTorrentLocation = config.get('config','bitTorrentLocation')
-    homeCity = config.get('config','homeCity')
-    vpnKillApp = config.get('config','vpnKillApp')
-    bittorrentApp = config.get('config','bittorrentApp')
-    fromEmail = config.get('config','fromEmail')
-    shortSleep = int(config.get('config','shortSleep'))
-    longSleep = int(config.get('config','longSleep'))
+config = ConfigParser.ConfigParser()
+config.read(myPath+"\config.ini")
+vpnScriptLocation = config.get('config','vpnScriptLocation')
+bitTorrentLocation = config.get('config','bitTorrentLocation')
+homeCity = config.get('config','homeCity')
+vpnKillApp = config.get('config','vpnKillApp')
+bittorrentApp = config.get('config','bittorrentApp')
+shortSleep = int(config.get('config','shortSleep'))
+longSleep = int(config.get('config','longSleep'))
     
-    print("config loaded \n")
-
-except:
-    print ("Error reading the config file")
+print("config loaded \n")
 
 
-def sendEmail (message) :
-    # spin up email server
-    server = smtplib.SMTP(emailServer)
-    server.ehlo()
-    server.starttls()
-    server.login(emailLogin,emailPassword)
 
-    emailBody = message
-
-    # compose the message
-    msg = "\r\n".join([
-        "From: " + fromEmail  ,
-        "To: " + emailLogin ,
-        "Subject: VPN Check" ,
-        "MIME-Version: 1.0",
-        "Content-type: text/html",
-            "",
-            emailBody
-            ])
-        
-    # send the email
-    server.sendmail("VPNcheck@noReply.com", emailLogin, msg)
-
-    # close email server
-    server.quit()
-
-
-# process to ensure that VPN is connected.  If it isn't, abort and send an email
+# process to ensure that VPN is connected.  If it isn't, kill the torrent app
 def VPNcheckRedundency() : 
     #fetch current location
     g = geocoder.ip('me')
@@ -69,13 +37,27 @@ def VPNcheckRedundency() :
     if g.city == homeCity : 
 
         os.system("TASKKILL /F /IM "+bittorrentApp) # close bittorrent to prevent traffic
-
-        sendEmail("VPN is not connected.  Script was aborted unexpectedly.")
-        
+        print ("Home City was detected.  VPN not confirmed, bailing on script.  Please try again.")
         sys.exit(0) # kill the script
 
     else : 
         print ("VPN confirmed active")
+
+
+# Determines if a given process is running and returns True or False
+def checkIfProcessRunning(processName):
+    '''
+    Check if there is any running process that contains the given name processName.
+    '''
+    #Iterate over the all the running process
+    for proc in psutil.process_iter():
+        try:
+            # Check if process name contains the given name string.
+            if processName.lower() in proc.name().lower():
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return False;
 
 
 def VPNisActive() :
@@ -91,44 +73,58 @@ def VPNisActive() :
     else :
         return True
 
-# first turned on.  Enable VPN and start bittorrent
-if enabled == "True" or enabled =="true" :
-    print("VPN enabled flag discovered")
-    subprocess.Popen(vpnScriptLocation,shell=True) # enables the VPN
+
+# config file was found enabled or called directly from the cmd argument.  Starts the VPN and opens torrent app
+def enable() :
+    print("VPN enabled flag discovered. Opening VPN application")
+    subprocess.Popen(vpnScriptLocation,shell=True) # runs the VPN application
+    time.sleep(longSleep) # wait to ensure the VPN app opens
+    print("Running VPN Script")
+    args = [vpnScriptLocation, '--connect', 'US East.ovpn']
+    subprocess.call(args)
     print ("VPN service started.  Awaiting connection.")
-    time.sleep(longSleep) # wait 30 seconds to ensure the VPN connects
+    time.sleep(longSleep) # wait to ensure the VPN connects
     VPNcheckRedundency() #ensure that connection is complete
     # subprocess.call([bitTorrentLocation])
     subprocess.Popen(bitTorrentLocation)
-    sendEmail("VPN connection successful.  Disable in config file to terminate.")
-
-else : 
-    print ("config not enabled.  closing")
-    sys.exit(0)
-
-
-print ("waiting until disabled in the config file")
-# keep the app running until the config is turned off, then kill bittorrent and kill the VPN
-while enabled =="True" or enabled == "true" :
+    print("Torrent app started")
     
-    time.sleep(longSleep) # wait 30 seconds
-    config.read(myPath+"\config.ini")
-    enabled = config.get('config','enabled') #check and see if it's still enabled
- 
 
-# torrenting complete and config change detected.  Kill VPN and bittorrent
-if enabled != "True" and enabled != "true" :
-    print ("change in config detected.  Shutting down")
-
+# config file status changed or called directly from the cmd argument.  Stops the VPN and kills torrent app
+def disable() : 
     os.system("TASKKILL /F /IM "+bittorrentApp) # close bittorrent to prevent traffic
-    time.sleep(shortSleep) # wait 15 seconds
-    os.system("TASKKILL /F /IM "+ vpnKillApp) # close VPN
-    time.sleep(longSleep) # wait 30 seconds
-    if VPNisActive() == False :
-        sendEmail("VPN successfully disconnected")
-    else : 
-        sendEmail("Error: expecting the VPN to be disconnected and it is still active")
+    time.sleep(shortSleep) # wait
 
+    #disconnect from the VPN
+    args = [vpnScriptLocation, '--command', 'disconnect_all']
+    subprocess.call(args)
+    time.sleep(longSleep) # wait to ensure the connection gets disconnected
+
+    os.system("TASKKILL /F /IM "+ vpnKillApp) # close VPN app
+    time.sleep(longSleep) # wait 30 seconds
+    
+
+
+
+
+if __name__ == '__main__' :
+    if len(sys.argv) == 2 : 
+        if sys.argv[1] == "start" :
+            enable() 
+        elif sys.argv[1] == "stop" :
+            disable()
+        elif sys.argv[1] == "check" :
+            print("VPN Active Status: " + str(VPNisActive()))
+            if checkIfProcessRunning(bittorrentApp):
+                print('Torrent app status: True')
+            else:
+                print('Torrent app status: False')
+
+        else :
+            print("Error.  You must provide argument start, stop, or check")
+
+    else :
+        print("Error.  You must provide argument start, stop, or check")
 
 
 
